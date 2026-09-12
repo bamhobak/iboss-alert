@@ -1,0 +1,83 @@
+name: iboss-alert
+
+on:
+  # GitHub 예약은 부하에 따라 밀리거나 통째로 유실된다(실측: 기대 10회 중 4회만 발화).
+  # 짧은 간격일수록 더 밀린다. 그래서 이 예약은 '보험'이고,
+  # 정시를 우리가 소유하려면 cron-job.org 같은 외부 스케줄러가
+  # 아래 repository_dispatch 를 10분마다 때려 주는 쪽이 주 트리거다. (README 참고)
+  schedule:
+    - cron: "*/10 * * * *"
+  repository_dispatch:
+    types: [check]
+  workflow_dispatch:
+    inputs:
+      seed:
+        description: "상태파일이 비어 있어도 알림 없이 기록만(첫 실행용)"
+        type: boolean
+        default: true
+      dry_run:
+        description: "텔레그램 전송 없이 로그만"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+# 겹쳐 돌면 같은 글을 두 번 알리거나 state.json 커밋이 충돌한다.
+# 취소하지 않고 줄을 세운다 — 취소하면 이미 보낸 알림의 기록이 날아간다.
+concurrency:
+  group: iboss-alert
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: 게시판 확인 및 알림
+        id: run
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CATEGORIES: ${{ vars.CATEGORIES || 'BCV' }}
+          SEED: ${{ (github.event_name == 'workflow_dispatch' && inputs.seed == false) && '0' || '1' }}
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
+        # 실패해도 state.json 은 커밋해야 한다(이미 보낸 알림의 기록이 들어 있다).
+        # 그래서 여기서 종료코드를 삼키되, 맨 끝 step 에서 다시 내보내 빨간불을 유지한다.
+        # continue-on-error 로 덮으면 알림이 죽어도 초록불이라 눈치를 못 챈다.
+        run: |
+          set +e
+          python iboss_alert.py
+          echo "code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: 상태 저장
+        run: |
+          if git diff --quiet -- state.json; then
+            echo "state.json 변화 없음"
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add state.json
+          git commit -m "state: 확인한 글번호 갱신 [skip ci]"
+          # 앞선 실행이 먼저 밀었을 수 있다 — 받아서 얹고 다시 시도
+          for i in 1 2 3; do
+            git push && exit 0
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+            sleep $((i * 3))
+          done
+          echo "state.json 을 밀지 못했다" >&2
+          exit 1
+
+      - name: 결과 반영
+        if: steps.run.outputs.code != '0'
+        run: |
+          echo "iboss_alert.py 가 ${{ steps.run.outputs.code }} 로 끝났다 (3=목록 파싱 실패/차단 의심, 2=토큰 없음, 1=일부 전송 실패)" >&2
+          exit 1
