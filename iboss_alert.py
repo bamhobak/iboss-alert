@@ -17,11 +17,12 @@
   DRY_RUN           1=텔레그램 전송 없이 콘솔에만 (기본 0)
 """
 
-APP_VERSION = "1.0.03"
+APP_VERSION = "1.0.04"
 
 import html
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -42,6 +43,13 @@ STATE_PATH = Path(__file__).with_name("state.json")
 
 # 이미 알린 글번호를 몇 개까지 들고 갈지. 게시판이 하루 몇 건이라 300 이면 몇 달치다.
 KEEP_SEEN = 300
+
+# 몇 판 연속 못 읽으면 폰으로 알릴지. 10분 주기이니 3 = 약 30분.
+# 한 판 실패는 흔한 일(클플 챌린지)이라 조용히 넘기고, 오래 막히면 시끄럽게 만든다.
+# 빨간불만 믿으면 안 된다 — Actions 를 아무도 안 본다는 걸 코스피 알림에서 배웠다.
+FAIL_ALERT_AFTER = 3
+
+NL = chr(10)          # 줄바꿈
 
 # 게시판 분류 코드 → 이름 (게시판 HTML 의 관심분야 선택기에서 그대로 가져왔다)
 CATEGORY_NAMES = {
@@ -74,6 +82,31 @@ load_dotenv()
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36")
 
+# 앞단이 Cloudflare 다. 러너에서 실측한 결과(2026-09-12):
+#   HTTP/1.1 + 아래 헤더 = 8회 중 7회 200, 실패한 1회는 cf-mitigated=challenge.
+#   httpx 의 HTTP/2 는 그 자리에서 403 — TLS·h2 지문이 봇으로 찍힌다. 그래서 requests 고정.
+# Accept-Encoding 에 br 을 넣지 않는다 — brotli 가 없으면 requests 가 압축을 못 풀어
+# 본문이 그대로 남고, 파싱이 조용히 0건이 된다(실측에서 24KB 로 나온 게 그거다).
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": ("text/html,application/xhtml+xml,application/xml;q=0.9,"
+               "image/avif,image/webp,image/apng,*/*;q=0.8"),
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept-Encoding": "gzip, deflate",
+    "Sec-Ch-Ua": '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
+}
+
+# 챌린지는 몇 분 뒤 IP 점수가 바뀌면 풀린다. 10분 주기이니 한 판에 2분까지는 기다려도 된다.
+RETRY_WAITS = (5, 15, 35, 60)
+
 
 def env_flag(name, default="0"):
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "y")
@@ -85,21 +118,24 @@ def strip_tags(s):
 
 
 def fetch_list(category):
-    """분류 하나의 목록 HTML 을 받아 온다."""
+    """분류 하나의 목록 HTML. 못 받으면 (None, 사유) 를 돌려준다 — 예외로 죽지 않는다."""
     url = LIST_URL if not category else f"{LIST_URL}?category_1={category}"
-    last_err = None
-    for attempt in range(3):
+    why = "?"
+    for i, wait in enumerate((0,) + RETRY_WAITS):
+        if wait:
+            time.sleep(wait + random.uniform(0, 3))   # 같은 초에 몰리지 않게 흔든다
         try:
-            r = requests.get(url, headers={"User-Agent": UA,
-                                           "Accept-Language": "ko-KR,ko;q=0.9"},
-                             timeout=20)
-            r.raise_for_status()
-            r.encoding = r.apparent_encoding or "utf-8"
-            return r.text
-        except Exception as e:          # 일시적인 실패는 몇 초 쉬고 다시
-            last_err = e
-            time.sleep(3 * (attempt + 1))
-    raise RuntimeError(f"목록을 받지 못했다: {url} ({last_err})")
+            r = requests.get(url, headers=HEADERS, timeout=25)
+            if r.status_code == 200:
+                r.encoding = r.apparent_encoding or "utf-8"
+                return r.text, ""
+            mit = r.headers.get("cf-mitigated", "")
+            why = f"HTTP {r.status_code}" + (f" (cf-mitigated={mit})" if mit else "")
+            print(f"  [{i+1}회차] {why}", flush=True)
+        except Exception as e:
+            why = repr(e)[:120]
+            print(f"  [{i+1}회차] {why}", flush=True)
+    return None, why
 
 
 # 목록의 한 칸: <div class="cell"> ... </div> 안에 bd_open / bd_closed 가 들어 있다
@@ -142,14 +178,16 @@ def parse_list(page_html, fallback_category=""):
 
 def load_state():
     if not STATE_PATH.exists():
-        return {"seen": [], "seeded": False, "last_run": ""}
+        return {"seen": [], "seeded": False, "last_run": "", "fail_streak": 0, "fail_notified": False}
     try:
         st = json.loads(STATE_PATH.read_text(encoding="utf-8"))
     except Exception:
         # 상태파일이 깨졌으면 새로 시작한다. 알림이 한 번 몰리는 것보다 낫다.
-        return {"seen": [], "seeded": False, "last_run": ""}
+        return {"seen": [], "seeded": False, "last_run": "", "fail_streak": 0, "fail_notified": False}
     st.setdefault("seen", [])
     st.setdefault("seeded", bool(st["seen"]))
+    st.setdefault("fail_streak", 0)
+    st.setdefault("fail_notified", False)
     return st
 
 
@@ -209,16 +247,43 @@ def main():
     st = load_state()
     seen = set(int(x) for x in st["seen"])
 
+    def note_failure(why):
+        """못 읽었을 때: 연속 횟수를 세고, 오래 막히면 폰으로 알린다."""
+        st["fail_streak"] = int(st.get("fail_streak", 0)) + 1
+        n = st["fail_streak"]
+        print(f"[실패] {why} — {n}회 연속", file=sys.stderr)
+        if n >= FAIL_ALERT_AFTER and not st.get("fail_notified"):
+            text = NL.join([
+                f"⚠️ 아이보스 게시판을 {n}회 연속 못 읽었다 (약 {n * 10}분).",
+                "새 의뢰 알림이 멈춘 상태다.",
+                f"사유: {why}",
+            ])
+            if dry or send_telegram(token, chat_id, text):
+                st["fail_notified"] = True
+        save_state(st, dry)
+        # 한두 판은 흔한 일이라 초록불로 넘긴다. 알릴 지경이 되면 빨간불도 같이 켠다.
+        return 4 if n >= FAIL_ALERT_AFTER else 0
+
     found = []
     for cat in categories:
-        items = parse_list(fetch_list(cat), cat)
+        page, why = fetch_list(cat)
+        if page is None:
+            return note_failure(f"{cat} 목록을 받지 못했다 · {why}")
+        items = parse_list(page, cat)
         if not items:
-            # 한 건도 못 뽑았으면 차단이거나 화면이 바뀐 것이다. 조용히 넘기면 알림이 죽는다.
-            print(f"[경고] {cat} 목록에서 글을 하나도 못 뽑았다 "
-                  f"(차단 또는 HTML 변경 의심)", file=sys.stderr)
-            return 3
+            # 받아왔는데 0건이면 차단이 아니라 화면 구조가 바뀐 쪽이 의심된다.
+            return note_failure(f"{cat} 은 {len(page)}바이트 받았는데 글이 0건 "
+                                f"(HTML 구조 변경 의심)")
         print(f"[{cat}] {len(items)}건 파싱 (최신 {items[0]['id']})")
         found.extend(items)
+
+    # 여기까지 왔으면 읽는 데 성공했다 — 막혀 있었다고 알렸으면 풀렸다고도 알린다
+    if st.get("fail_notified"):
+        recov = "✅ 아이보스 게시판 읽기가 복구됐다. 새 의뢰 알림 정상."
+        if dry or send_telegram(token, chat_id, recov):
+            print("복구 알림 전송")
+    st["fail_streak"] = 0
+    st["fail_notified"] = False
 
     # 글번호 중복 제거 후, 오래된 글부터 보낸다 → 최신 글이 맨 아래(가장 최근 메시지)에 온다
     uniq = {}

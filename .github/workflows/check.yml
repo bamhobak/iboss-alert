@@ -79,5 +79,8 @@ jobs:
       - name: 결과 반영
         if: steps.run.outputs.code != '0'
         run: |
-          echo "iboss_alert.py 가 ${{ steps.run.outputs.code }} 로 끝났다 (3=목록 파싱 실패/차단 의심, 2=토큰 없음, 1=일부 전송 실패)" >&2
+          echo "iboss_alert.py 가 ${{ steps.run.outputs.code }} 로 끝났다" >&2
+          echo "  4 = 게시판을 30분 이상 못 읽었다(텔레그램으로 이미 알렸다)" >&2
+          echo "  2 = 토큰/채널 설정 없음   1 = 일부 전송 실패" >&2
+          echo "※ 한두 판 실패는 종료코드 0 으로 넘어간다 — 클플 챌린지가 간헐적으로 뜬다" >&2
           exit 1
