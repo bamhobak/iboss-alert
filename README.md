@@ -41,13 +41,48 @@ https://www.i-boss.co.kr/ab-1958-88422
 | **httpx HTTP/2** | **403 challenge** |
 | 연속 3회 반복 | 200 · 200 · 200 |
 
-정리하면 **속도 제한도 IP 전면차단도 아니다.** 러너 IP 의 봇 점수에 따라 판마다 갈린다.
-그리고 **HTTP/2 는 쓰면 안 된다** — TLS·h2 지문이 봇으로 찍힌다. 그래서 `requests`(HTTP/1.1) 고정이다.
+**HTTP/2 는 쓰면 안 된다** — TLS·h2 지문이 봇으로 찍힌다. 그래서 `requests`(HTTP/1.1) 고정이다.
 
-대응은 "한 판 놓치는 건 견디고, 오래 막히면 시끄럽게" 다. 10분 주기라 한 판 놓쳐도 20분 안에 온다.
-계속 막히면 내 PC 상주(작업 스케줄러)로 옮기는 게 확실하다 — 집 IP 는 200 이 나온다.
+그런데 그 뒤 러너 6대를 동시에 띄워 각기 다른 IP 로 한 번씩 재 보니 **6/6 전부 403** 이었다.
+20분 동안 Azure IP 로 스무 번쯤 요청한 사이에 차단이 굳은 것으로 보인다.
+즉 **GitHub 러너에서 게시판에 직접 요청하는 길은 못 쓴다.** 집 IP 는 그때도 200 이었다.
 
-러너에서 다시 재 보려면 Actions → `diag-403` → Run workflow.
+## 그래서 구조: 가져오기는 Supabase, 나머지는 Actions
+
+```
+  GitHub Actions (10분 주기)
+        │  ① 목록 요청 (막히지 않음)
+        ▼
+  Supabase 엣지 함수 iboss  ──②──▶  i-boss.co.kr  (서울 엣지, 200)
+        │  ③ HTML 그대로 돌려줌
+        ▼
+  Actions: 새글 판정 → 텔레그램 전송 → state.json 커밋
+```
+
+가져오는 일만 옮겼다. 일정·상태·전송은 그대로 Actions 다 — Actions 에서 Supabase 와
+텔레그램으로 나가는 길은 둘 다 막히지 않는다.
+
+| 항목 | 값 |
+|---|---|
+| 함수 | `supabase/functions/iboss/index.ts` |
+| 프로젝트 | `wsrgqjawhnrjxifqqkjl` (kospi-volume 과 같은 프로젝트) |
+| 주소 | `https://wsrgqjawhnrjxifqqkjl.supabase.co/functions/v1/iboss?cat=BCV` |
+| 인증 | Supabase anon 키 (아무나 프록시로 쓰지 못하게 JWT 검증을 켜 뒀다) |
+| 실측 | 200 · ray `...-ICN` (서울) · 90,440자 · 파싱 20건 정상 |
+
+배포:
+
+```powershell
+$env:SUPABASE_ACCESS_TOKEN = (kospi-volume\.env 의 값)
+npx --yes supabase@latest functions deploy iboss --project-ref wsrgqjawhnrjxifqqkjl
+```
+
+`Docker is not running` 경고는 무시해도 배포된다.
+
+`FETCHER_URL` · `FETCHER_KEY` 가 비어 있으면 스크립트는 **직접 요청만** 한다 —
+내 PC 에서 돌릴 때가 그 경우다. 엣지가 실패하면 직접 요청도 한 번 해 본다.
+
+러너에서 차단 상태를 다시 재 보려면 Actions → `diag-403` → Run workflow.
 
 ## 설정
 

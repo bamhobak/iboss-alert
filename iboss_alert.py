@@ -15,9 +15,11 @@
   SEED              1=상태파일 없으면 알림 없이 기록만 (기본 1)
   INCLUDE_CLOSED    1=[마감] 글도 알림 (기본 0)
   DRY_RUN           1=텔레그램 전송 없이 콘솔에만 (기본 0)
+  FETCHER_URL       Supabase 엣지 함수 주소 (있으면 그쪽으로 대신 받는다)
+  FETCHER_KEY       그 함수 호출용 Supabase anon 키
 """
 
-APP_VERSION = "1.0.04"
+APP_VERSION = "1.0.05"
 
 import html
 import json
@@ -107,6 +109,11 @@ HEADERS = {
 # 챌린지는 몇 분 뒤 IP 점수가 바뀌면 풀린다. 10분 주기이니 한 판에 2분까지는 기다려도 된다.
 RETRY_WAITS = (5, 15, 35, 60)
 
+# 대리 수신 — Supabase 엣지 함수(서울). GitHub 러너는 게시판에 직접 못 닿는다(403).
+# 이 둘이 비어 있으면 직접 요청만 한다(내 PC 에서 돌릴 때).
+FETCHER_URL = os.environ.get("FETCHER_URL", "").strip()
+FETCHER_KEY = os.environ.get("FETCHER_KEY", "").strip()
+
 
 def env_flag(name, default="0"):
     return os.environ.get(name, default).strip().lower() in ("1", "true", "yes", "y")
@@ -117,21 +124,52 @@ def strip_tags(s):
     return html.unescape(s).replace("\xa0", " ").strip()
 
 
-def fetch_list(category):
-    """분류 하나의 목록 HTML. 못 받으면 (None, 사유) 를 돌려준다 — 예외로 죽지 않는다."""
+def fetch_direct(category):
+    """게시판에 바로 요청한다. 집 IP 는 통하고, 데이터센터 IP 는 자주 막힌다."""
     url = LIST_URL if not category else f"{LIST_URL}?category_1={category}"
+    r = requests.get(url, headers=HEADERS, timeout=25)
+    if r.status_code == 200:
+        r.encoding = r.apparent_encoding or "utf-8"
+        return r.text, ""
+    mit = r.headers.get("cf-mitigated", "")
+    return None, f"직접 HTTP {r.status_code}" + (f" (cf-mitigated={mit})" if mit else "")
+
+
+def fetch_via_edge(category):
+    """Supabase 엣지 함수(서울)에 대신 받아 오게 시킨다. Actions 에서 쓰는 길이다."""
+    r = requests.get(FETCHER_URL, params={"cat": category}, timeout=45,
+                     headers={"apikey": FETCHER_KEY,
+                              "Authorization": f"Bearer {FETCHER_KEY}"})
+    if r.status_code != 200:
+        return None, f"엣지 함수 HTTP {r.status_code}: {r.text[:120]}"
+    d = r.json()
+    if not d.get("ok") or not d.get("html"):
+        return None, (f"엣지가 게시판에서 {d.get('status')} 받았다"
+                      f" (cf-mitigated={d.get('mitigated', '-')})")
+    return d["html"], ""
+
+
+def fetch_list(category):
+    """분류 하나의 목록 HTML. 못 받으면 (None, 사유) 를 돌려준다 — 예외로 죽지 않는다.
+
+    엣지 함수가 설정돼 있으면 그쪽을 먼저 쓴다(러너는 직접 요청이 막힌다).
+    실패하면 직접 요청도 한 번 해 본다 — 내 PC 에서 돌릴 때는 그게 정답이다.
+    """
+    routes = ([("엣지", fetch_via_edge)] if FETCHER_URL and FETCHER_KEY else []) \
+        + [("직접", fetch_direct)]
     why = "?"
     for i, wait in enumerate((0,) + RETRY_WAITS):
         if wait:
             time.sleep(wait + random.uniform(0, 3))   # 같은 초에 몰리지 않게 흔든다
         try:
-            r = requests.get(url, headers=HEADERS, timeout=25)
-            if r.status_code == 200:
-                r.encoding = r.apparent_encoding or "utf-8"
-                return r.text, ""
-            mit = r.headers.get("cf-mitigated", "")
-            why = f"HTTP {r.status_code}" + (f" (cf-mitigated={mit})" if mit else "")
-            print(f"  [{i+1}회차] {why}", flush=True)
+            for name, fn in routes:
+                page, reason = fn(category)
+                if page:
+                    if i or name != routes[0][0]:
+                        print(f"  [{i+1}회차/{name}] 성공", flush=True)
+                    return page, ""
+                why = f"{name}: {reason}"
+                print(f"  [{i+1}회차] {why}", flush=True)
         except Exception as e:
             why = repr(e)[:120]
             print(f"  [{i+1}회차] {why}", flush=True)

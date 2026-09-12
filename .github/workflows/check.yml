@@ -47,6 +47,10 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CATEGORIES: ${{ vars.CATEGORIES || 'BCV' }}
+          # 러너는 게시판에 직접 못 닿는다(클플 403, 러너 6대 6/6 실측).
+          # 그래서 받아 오는 일만 Supabase 엣지 함수(서울)에 맡긴다. README 참고.
+          FETCHER_URL: ${{ secrets.FETCHER_URL }}
+          FETCHER_KEY: ${{ secrets.FETCHER_KEY }}
           SEED: ${{ (github.event_name == 'workflow_dispatch' && inputs.seed == false) && '0' || '1' }}
           DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '1' || '0' }}
         # 실패해도 state.json 은 커밋해야 한다(이미 보낸 알림의 기록이 들어 있다).
