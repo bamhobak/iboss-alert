@@ -1,0 +1,17 @@
+name: diag-403
+
+# 진단 전용 — 손으로만 돌린다. 러너에서 어떤 요청 방식이 403 을 피하는지 본다.
+# 답이 나오면 이 워크플로와 diag_403.py 는 지운다.
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests "httpx[http2]"
+      - run: python diag_403.py
