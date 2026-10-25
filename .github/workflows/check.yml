@@ -5,8 +5,15 @@ on:
   # 짧은 간격일수록 더 밀린다. 그래서 이 예약은 '보험'이고,
   # 정시를 우리가 소유하려면 cron-job.org 같은 외부 스케줄러가
   # 아래 repository_dispatch 를 10분마다 때려 주는 쪽이 주 트리거다. (README 참고)
+  # 2026-10-26: 9월엔 한 번도 안 뜨던 예약이 요즘 다시 살아났다. 그런데 cron-job.org 와
+  # 같은 분(0·10·20…)에 떠서 두 판이 겹치고, state.json 푸시가 부딪혀 빨간불이 났다
+  # (20일에 6번). 그래서 예약을 **겹치지 않는 시각**으로 옮긴다.
+  #
+  # 예약을 아예 빼지는 않는다 — cron-job.org 가 죽으면 아무도 안 돌고,
+  # 그러면 '못 읽었다' 감시견조차 짖지 못한다(스크립트가 실행돼야 짖는다).
+  # 매시 35분 한 번이면 그 조용한 죽음을 한 시간 안에 드러낸다.
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "35 * * * *"
   repository_dispatch:
     types: [check]
   workflow_dispatch:
@@ -69,12 +76,28 @@ jobs:
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add state.json
-          git commit -m "state: 확인한 글번호 갱신 [skip ci]"
-          # 앞선 실행이 먼저 밀었을 수 있다 — 받아서 얹고 다시 시도
-          for i in 1 2 3; do
-            git push && exit 0
-            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+
+          # 내 실행 결과를 따로 빼 둔다. 아래에서 작업트리를 원격 최신으로 되돌릴 것이기 때문이다.
+          cp state.json "$RUNNER_TEMP/mine.json"
+
+          # 예전 방식(commit 뒤 pull --rebase)은 state.json 한 파일을 양쪽이 고치면
+          # 충돌로 멈췄다. 이제는 **원격 최신을 바닥에 깔고 내 기록을 얹는다** —
+          # seen 은 합집합이라 어느 쪽 알림 기록도 버려지지 않는다.
+          for i in 1 2 3 4 5; do
+            git fetch -q origin "${GITHUB_REF_NAME}"
+            git reset -q --hard "origin/${GITHUB_REF_NAME}"
+            python merge_state.py "$RUNNER_TEMP/mine.json" || exit 1
+            git add state.json
+            if git diff --cached --quiet; then
+              echo "원격이 이미 같은 내용이다 — 밀 것 없음"
+              exit 0
+            fi
+            git commit -q -m "state: 확인한 글번호 갱신 [skip ci]"
+            if git push -q; then
+              echo "상태 저장 완료 (${i}회차)"
+              exit 0
+            fi
+            echo "  ${i}회차 푸시 실패 — 원격을 다시 받아 얹는다"
             sleep $((i * 3))
           done
           echo "state.json 을 밀지 못했다" >&2
