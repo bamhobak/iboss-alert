@@ -127,7 +127,7 @@
   87831
  ],
  "seeded": true,
- "last_run": "2026-11-03 06:52:28",
- "fail_streak": 2,
- "fail_notified": false
+ "last_run": "2026-11-03 07:02:50",
+ "fail_streak": 3,
+ "fail_notified": true
 }
