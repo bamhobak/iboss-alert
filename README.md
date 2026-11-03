@@ -1,5 +1,12 @@
 # iboss-alert
 
+> **2026-11-03 서버컴으로 이전 — 이 레포의 GitHub Actions 는 꺼져 있다.**
+> 아이보스(Cloudflare)가 데이터센터 IP 를 막기 시작했다. GitHub 러너도, 우회로 쓰던 Supabase 서울 엣지도 403 이고,
+> `curl_cffi` 로 크롬·사파리·엣지 TLS 지문 6종을 흉내 내도 전부 403 이었다(지문이 아니라 IP 차단).
+> 국내 회선인 서버컴은 200 이라, 지금은 서버컴 `C:\server-kit\iboss\` 의 예약 작업 `IbossAlert`(10분마다)가 돈다.
+> 같은 `iboss_alert.py` 를 쓰고, 상태(`state.json`)와 토큰(`.env`)은 서버에만 있다. 이 레포는 코드 원본·기록용이다.
+> cron-job.org 작업은 워크플로가 꺼져 있어 아무것도 돌리지 않는다(지워도 된다).
+
 아이보스 [대행의뢰 게시판](https://www.i-boss.co.kr/ab-1957?category_1=BCV)의 **블로그·카페·바이럴(BCV)**
 분류에 새 의뢰가 올라오면 텔레그램으로 알린다. 10분 주기.
 
